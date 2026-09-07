@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="本机 Codex 项目进度、耗时、token 与日报。">
+  <title>Codex Pulse · 项目运行看板</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<div id="codex-pulse">
+  <div class="cp-shell">
+    <aside class="cp-sidebar">
+      <a href="#overview" class="cp-logo"><span class="cp-logo-mark">↗</span> Pulse</a>
+      <nav class="cp-nav" aria-label="主要导航">
+        <a href="#overview" data-nav="overview">总览</a>
+        <a href="#projects" data-nav="projects">项目</a>
+        <a href="#usage" data-nav="usage">用量</a>
+        <a href="#report" data-nav="report">日报</a>
+        <a href="#settings" data-nav="settings">设置</a>
+      </nav>
+      <div class="cp-side-bottom"><strong>本机只读</strong>Codex Pulse <span id="version">0.1.0</span></div>
+    </aside>
+    <div class="cp-main">
+      <header class="cp-chrome"><span><b>项目运行台</b> <span class="cp-muted">/ Codex</span></span><span id="connection" role="status">正在连接本机采集器…</span></header>
+      <div class="cp-content">
+        <div class="cp-heading"><div><h1 id="page-title">总览</h1><p class="cp-muted" id="page-subtitle">项目、时间与用量，一处查看</p></div><div class="cp-date-controls"><label for="date">统计日期</label><input type="date" id="date" class="cp-date"><button class="cp-button" id="refresh">刷新</button></div></div>
+        <div id="error" role="alert" hidden></div>
+        <main id="content" aria-busy="true"><div class="cp-empty">正在读取真实任务记录，首次索引可能需要片刻…</div></main>
+        <footer class="cp-footer"><span id="scope">数据仅保存在此设备</span><span id="updated"></span></footer>
+      </div>
+    </div>
+  </div>
+</div>
+<noscript>请启用 JavaScript 以显示实时看板。</noscript>
+</body>
+</html>
