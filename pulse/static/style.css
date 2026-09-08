@@ -163,3 +163,26 @@
 
 #codex-pulse .cp-timing-note { display: block; margin-top: 4px; color: var(--cp-sub); font-size: 12px; font-weight: 400; line-height: 1.5; }
 #codex-pulse .cp-turn-row > span:not(:first-child) { flex-shrink: 0; white-space: nowrap; }
+#codex-pulse .cp-quota .cp-panel-top { align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+#codex-pulse .cp-quota-status { display: inline-block; font-size: 12px; font-weight: 400; margin-left: 8px; color: var(--cp-sub); }
+#codex-pulse .cp-quota-status.cp-green { color: var(--cp-green); }
+#codex-pulse .cp-quota-scope { margin-top: 8px; line-height: 1.6; }
+#codex-pulse .cp-quota .cp-actions { align-items: center; gap: 16px; }
+#codex-pulse .cp-quota-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(230px,1fr)); gap: 20px; padding: 22px; }
+#codex-pulse .cp-quota-label { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; line-height: 1.6; }
+#codex-pulse .cp-quota-label strong { overflow-wrap: anywhere; }
+#codex-pulse .cp-quota-label > span { color: var(--cp-sub); flex-shrink: 0; }
+#codex-pulse .cp-quota-value { font-size: 32px; font-weight: 650; margin: 12px 0; color: var(--cp-green); font-variant-numeric: tabular-nums; }
+#codex-pulse .cp-quota-value small { font-size: 19px; margin-left: 3px; }
+#codex-pulse .cp-quota-value > span { font-size: 12px; color: var(--cp-sub); font-weight: 400; margin-left: 10px; }
+#codex-pulse .cp-quota-track { height: 7px; }
+#codex-pulse .cp-quota-track.is-low .cp-project-fill { background: var(--cp-amber); }
+#codex-pulse .cp-quota-window.is-stale .cp-project-fill { background: var(--cp-sub); }
+#codex-pulse .cp-quota-window.is-stale .cp-quota-value { color: var(--cp-sub); }
+#codex-pulse .cp-quota-reset { margin-top: 12px; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+#codex-pulse .cp-quota-foot { display: flex; flex-wrap: wrap; gap: 8px 20px; padding: 14px 22px; border-top: 1px solid var(--cp-border); font-size: 12px; color: var(--cp-sub); line-height: 1.7; }
+#codex-pulse .cp-quota-explain { padding: 0 22px 16px; font-size: 12px; line-height: 1.7; }
+#codex-pulse .cp-quota-notice { padding: 14px 22px; color: var(--cp-amber); background: var(--cp-amberbg); font-size: 13px; line-height: 1.7; }
+#codex-pulse .cp-quota-warning { color: var(--cp-amber); font-size: 12px; margin-top: 8px; }
+#codex-pulse .cp-quota-message:not(:empty) { padding: 0 22px 16px; font-size: 13px; }
+@media(max-width:620px){#codex-pulse .cp-quota-grid{grid-template-columns:1fr;padding:16px;gap:24px}#codex-pulse .cp-quota-foot{padding:14px 16px}}

@@ -23,10 +23,11 @@ def launch(*args, check=True):
 
 
 def config(args, release):
+    quota_args = ["--no-quota"] if args.no_quota else (["--codex-cli", args.codex_cli] if args.codex_cli else [])
     return {"Label": LABEL,
             "ProgramArguments": [sys.executable, "-B", "-m", "pulse", "--port", str(args.port),
                                  "--data-dir", str(BASE / "data"), "--codex-home", str(args.codex_home),
-                                 "--timezone", args.timezone, "--days", str(args.days)],
+                                 "--timezone", args.timezone, "--days", str(args.days)] + quota_args,
             "WorkingDirectory": str(release), "RunAtLoad": True, "KeepAlive": True,
             "ThrottleInterval": 10, "ProcessType": "Background",
             "StandardOutPath": str(BASE / "logs/stdout.log"),
@@ -94,11 +95,21 @@ def main():
     parser.add_argument("--timezone", default="Asia/Shanghai")
     parser.add_argument("--days", type=int, default=30)
     parser.add_argument("--codex-home", type=Path, default=Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")))
+    parser.add_argument("--codex-cli", default=os.environ.get("CODEX_PULSE_CLI"))
+    parser.add_argument("--no-quota", action="store_true")
     args = parser.parse_args()
     args.codex_home = args.codex_home.expanduser().resolve()
     if sys.platform != "darwin":
         parser.error("LaunchAgent installation requires macOS; use python3 -m pulse elsewhere.")
     if args.action in ("plan", "install"):
+        sys.path.insert(0, str(ROOT))
+        from pulse.quota import discover_codex, QuotaError
+        if not args.no_quota:
+            try:
+                args.codex_cli = discover_codex(args.codex_cli)
+            except QuotaError:
+                if args.codex_cli:
+                    parser.error("Codex CLI path is not executable")
         from zoneinfo import ZoneInfo
         ZoneInfo(args.timezone)
         if not 1024 <= args.port <= 65535 or not 1 <= args.days <= 365:

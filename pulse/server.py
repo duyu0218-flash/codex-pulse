@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 from . import __version__
 from .collector import Collector, atomic_json
+from .quota import QuotaMonitor
 
 STATIC = Path(__file__).parent / "static"
 DEFAULTS = {"refreshSeconds": 5, "staleSeconds": 300, "theme": "system"}
@@ -54,7 +55,7 @@ def report(snapshot):
               "不同项目可能并行，项目运行时长不可直接相加。设置变更不续计时，复制的历史回合不重复计时。",
               "状态来自日志观测，静默或断开后显示未确认；未确认区间的耗时只计至最后执行活动。",
               f"旧格式响应 {snapshot['source']['legacyResponses']} 条；解析/重置提示 {snapshot['source']['warnings']} 条。",
-              "内部审批与记忆任务排除；账户配额未接入。"]
+              "内部审批与记忆任务排除；当前账户额度请查看实时看板，不计入历史日报。"]
     return "\n".join(lines)
 
 
@@ -62,8 +63,9 @@ class PulseServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, port, collector):
+    def __init__(self, port, collector, quota=None):
         self.collector = collector
+        self.quota = quota or QuotaMonitor(collector.home, enabled=False)
         self.settings_lock = threading.Lock()
         self.settings_path = collector.data_dir / "settings.json"
         try:
@@ -122,6 +124,7 @@ class Handler(BaseHTTPRequestHandler):
         data = self.server.collector.snapshot(date, self.server.settings["staleSeconds"])
         data["settings"] = self.server.settings.copy()
         data["version"] = __version__
+        data["quota"] = self.server.quota.snapshot()
         return data
 
     def do_GET(self):
@@ -140,6 +143,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.json(200, {"version": __version__, **self.server.collector.status})
             if path == "/api/settings":
                 return self.json(200, self.server.settings)
+            if path == "/api/quota":
+                return self.json(200, self.server.quota.snapshot())
             if path == "/api/snapshot":
                 return self.json(200, self.snapshot())
             if path == "/api/report":
@@ -155,6 +160,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.allowed(write=True):
             return self.json(403, {"error": "仅允许本机同源操作"})
+        if self.path == "/api/quota/refresh":
+            accepted = self.server.quota.request_refresh()
+            return self.json(202 if accepted else 200, {"accepted": accepted, "quota": self.server.quota.snapshot()})
         if self.path != "/api/settings":
             return self.json(404, {"error": "入口不存在"})
         try:
@@ -179,6 +187,8 @@ def main():
     parser.add_argument("--data-dir", type=Path, default=Path.home() / ".local/share/codex-pulse")
     parser.add_argument("--timezone", default=os.environ.get("TZ", "Asia/Shanghai"))
     parser.add_argument("--days", type=int, choices=range(1, 366), default=30, metavar="1..365")
+    parser.add_argument("--codex-cli", default=os.environ.get("CODEX_PULSE_CLI"), help="Path to Codex CLI for account quota")
+    parser.add_argument("--no-quota", action="store_true", help="Disable official account quota queries")
     args = parser.parse_args()
     try:
         ZoneInfo(args.timezone)
@@ -188,9 +198,11 @@ def main():
         parser.error("Port must be 1024..65535")
     args.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     collector = Collector(args.codex_home, args.data_dir, args.timezone, args.days)
-    server = PulseServer(args.port, collector)
+    quota = QuotaMonitor(args.codex_home, args.codex_cli, enabled=not args.no_quota)
+    server = PulseServer(args.port, collector, quota)
     worker = threading.Thread(target=collector.run, daemon=True, name="collector")
     worker.start()
+    quota.start()
     def shutdown(*_):
         collector.stop.set()
         threading.Thread(target=server.shutdown, daemon=True).start()
@@ -202,6 +214,7 @@ def main():
     finally:
         collector.stop.set()
         worker.join(timeout=10)
+        quota.close()
         server.server_close()
 
 

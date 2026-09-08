@@ -77,6 +77,37 @@ class HTTPTests(unittest.TestCase):
             self.assertIn("记录不完整的回合 0 个", body)
             self.assertIn("| 运行秒数 | 并行累计秒数 | 不完整回合 |", body)
 
+    def test_quota_is_current_for_every_date_and_has_separate_refresh(self):
+        class CurrentQuota:
+            def snapshot(self):
+                return {"available": True, "scope": "account", "buckets": [], "updatedAt": 2000000000}
+            def request_refresh(self):
+                return True
+        self.server.quota = CurrentQuota()
+        with self.request("/api/quota") as r:
+            quota = json.load(r)
+        for day in ["", "?date=" + self.collector.snapshot(datetime.now(self.collector.zone).date().isoformat())["minDate"]]:
+            with self.request("/api/snapshot" + day) as r:
+                self.assertEqual(json.load(r)["quota"], quota)
+        with self.request("/api/quota/refresh", {"X-Pulse-Request": "1"}, b"") as r:
+            self.assertEqual(r.status, 202)
+            self.assertTrue(json.load(r)["accepted"])
+        with self.request("/api/report") as r:
+            text = r.read().decode()
+            self.assertIn("不计入历史日报", text)
+            self.assertNotIn("2000000000", text)
+
+    def test_quota_refresh_rejects_csrf_and_does_not_create_a_generic_rpc_proxy(self):
+        for headers in [{}, {"X-Pulse-Request": "1", "Origin": "https://evil.example"}]:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request("/api/quota/refresh", headers, b"")
+            self.assertEqual(error.exception.code, 403)
+        with self.request("/api/quota/refresh", {"X-Pulse-Request": "1"}, b"") as r:
+            self.assertFalse(json.load(r)["accepted"])
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request("/api/rpc", {"X-Pulse-Request": "1"}, b'{"method":"account/logout"}')
+        self.assertEqual(error.exception.code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()
