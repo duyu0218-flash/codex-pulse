@@ -72,7 +72,10 @@ class HTTPTests(unittest.TestCase):
     def test_markdown_download(self):
         with self.request("/api/report") as r:
             self.assertIn("attachment", r.headers["Content-Disposition"])
-            self.assertIn("日报", r.read().decode())
+            body = r.read().decode()
+            self.assertIn("当日运行时长 0 秒（并行重叠只计一次）；回合并行累计 0 秒", body)
+            self.assertIn("记录不完整的回合 0 个", body)
+            self.assertIn("| 运行秒数 | 并行累计秒数 | 不完整回合 |", body)
 
 
 if __name__ == "__main__":

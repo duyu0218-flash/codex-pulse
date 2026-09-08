@@ -6,9 +6,9 @@ Use synthetic data for automated regression tests. Keep actual task names, local
 
 | Entrance | Expected checks |
 |---|---|
-| Overview | Live connection, daily metrics, project bars, all/running/attention filters, empty state |
+| Overview | Live connection, daily runtime union versus parallel sum, incomplete-turn warning, project bars, all/running/attention filters, empty state |
 | Projects | Search, empty search, project details, project → task → project → list |
-| Task | Known/unknown plan, turn history, source details, missing record |
+| Task | Known/unknown plan, turn history with start/observed endpoint and incomplete labels, source details, missing record |
 | Usage | Input/cache/output/reasoning, project/model totals, unavailable quota |
 | Report | Correct selected date, copy, Markdown download |
 | Settings | Input validation, save, navigate away/back, process restart persistence, themes |
@@ -21,6 +21,8 @@ Actual business flow: **overview → project search → project → task → ret
 ## Automated coverage
 
 The regression suite covers token subsets, response deduplication, legacy-counter resets, copied/forked history, equal-step plan aggregation, missing/changed plans, incomplete writes, truncation, child attribution, midnight clipping, concurrent interval union, stale-turn accounting, post-completion metadata, cache persistence and prompt omission. HTTP tests cover empty data, static pages, settings reload, cross-origin/Host rejection, CSRF protection, traversal/private-path denial, invalid parameters and report downloads.
+
+Timing regressions additionally cover missing terminal events followed by hours-later settings, user input and context records; unchanged usage and repeated response records; superseded unfinished turns; fork exports with rebased envelope timestamps and whole-second lifecycle precision; project interval union; and invalidation of the old duration cache. Raw-log replay audits and screenshots remain private.
 
 ## Release boundaries
 

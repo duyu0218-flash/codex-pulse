@@ -18,6 +18,17 @@ from zoneinfo import ZoneInfo
 FIELDS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
           "output_tokens", "reasoning_output_tokens", "total_tokens")
 INTERNAL = {"guardian_review", "memory_extraction", "memory_consolidation"}
+CACHE_VERSION = 3
+TERMINAL = {"task_complete", "turn_aborted", "task_failed"}
+ACTIVITY_EVENTS = {"item_started", "item_completed", "agent_message", "agent_reasoning",
+                   "agent_message_delta", "agent_reasoning_delta",
+                   "plan_update", "plan_updated", "exec_command_begin", "exec_command_end",
+                   "exec_command_output_delta", "mcp_tool_call_begin", "mcp_tool_call_end",
+                   "web_search_begin", "web_search_end"}
+ACTIVITY_ITEMS = {"reasoning", "agent_message", "function_call", "function_call_output",
+                  "custom_tool_call", "custom_tool_call_output", "web_search_call",
+                  "image_generation_call", "local_shell_call", "computer_call",
+                  "computer_call_output"}
 
 
 def timestamp(value, fallback=0.0):
@@ -82,6 +93,7 @@ class Rollout:
     def __init__(self, thread_id, cached=None):
         self.data = cached or {"id": thread_id, "offset": 0, "inode": None,
                               "turns": {}, "responses": {}, "legacy": {},
+                              "ignored_turns": [],
                               "current": None, "model": "unknown", "parent": None,
                               "last_total": None, "warnings": 0, "created": 0}
 
@@ -89,7 +101,7 @@ class Rollout:
         return self.data["turns"].setdefault(turn_id, {
             "id": turn_id, "start": None, "end": None, "last": ts,
             "status": "unknown", "plan": None, "model": self.data["model"],
-            "waiting_call": None})
+            "waiting_call": None, "superseded": False})
 
     def ingest(self, row):
         d = self.data
@@ -111,33 +123,62 @@ class Rollout:
         # Forked history predates this session and does not represent new work.
         if ts and ts < d["created"]:
             return
+        event = p.get("type") if kind == "event_msg" else None
+        turn_id = p.get("turn_id") or d["current"]
+        # Fork exports may rebase the row timestamp while preserving the original
+        # lifecycle times. Compare at lifecycle precision (whole epoch seconds).
+        if (event in TERMINAL | {"task_started"} and p.get("started_at") is not None
+                and timestamp(p["started_at"]) < int(d["created"])):
+            if turn_id and turn_id not in d["ignored_turns"]:
+                d["ignored_turns"].append(turn_id)
+            if event == "task_started" or d["current"] == turn_id:
+                d["current"] = None
+            return
+        if turn_id in d["ignored_turns"]:
+            return
         if kind == "turn_context":
             d["current"] = p.get("turn_id", d["current"])
             d["model"] = p.get("model", d["model"])
-            if d["current"]:
-                self.turn(d["current"], ts)["model"] = d["model"]
+            if d["current"] in d["turns"]:
+                d["turns"][d["current"]]["model"] = d["model"]
             return
         if kind == "token_usage_record":
             if p.get("thread_id", d["id"]) != d["id"] or not p.get("response_id"):
+                return
+            if p["response_id"] in d["responses"]:
                 return
             d["responses"][p["response_id"]] = {
                 "thread": d["id"], "turn": p.get("turn_id", d["current"]),
                 "ts": ts, "model": d["model"], "usage": usage(p.get("usage")),
                 "source": "response"}
-        event = p.get("type") if kind == "event_msg" else None
-        turn_id = p.get("turn_id") or d["current"]
+        info = p.get("info") if isinstance(p.get("info"), dict) else {}
+        counter = usage(info["total_token_usage"]) if info.get("total_token_usage") else None
+        if event == "token_count" and counter is None:
+            return
+        token_activity = (event == "token_count" and counter is not None
+                          and counter["total_tokens"] > (d["last_total"] or usage({}))["total_tokens"])
+        activity = (kind == "token_usage_record" or event in ACTIVITY_EVENTS or token_activity
+                    or kind == "response_item" and (p.get("type") in ACTIVITY_ITEMS
+                        or p.get("type") == "message" and p.get("role") == "assistant"))
+        if not activity and event not in TERMINAL | {"task_started", "token_count"}:
+            return  # Settings, user input and other metadata are not execution.
         if event == "task_started":
             turn_id = p.get("turn_id") or "legacy-" + str(ts)
             # An unmatched preceding start is incomplete, never a fabricated end.
+            for previous_id, previous in d["turns"].items():
+                if previous_id != turn_id and previous["end"] is None:
+                    previous["superseded"] = True
             d["current"] = turn_id
             t = self.turn(turn_id, ts)
-            t.update(start=timestamp(p.get("started_at"), ts), status="running")
+            if t["end"] is None:
+                t.update(start=timestamp(p.get("started_at"), ts), status="running")
         if not turn_id:
             return
         t = self.turn(turn_id, ts)
-        if t["end"] is None or event in ("task_complete", "turn_aborted", "task_failed"):
+        if ((activity or event == "task_started") and t["end"] is None
+                and not t["superseded"]) or event in TERMINAL:
             t["last"] = max(ts, t["last"])
-        if event in ("task_complete", "turn_aborted", "task_failed"):
+        if event in TERMINAL:
             t["end"] = timestamp(p.get("completed_at"), ts)
             if p.get("started_at"):
                 t["start"] = timestamp(p["started_at"])
@@ -221,7 +262,7 @@ class Collector:
         self.saved = 0
         try:
             cached = json.loads((self.data_dir / "cache.json").read_text())
-            if cached.get("version") == 2 and cached.get("home") == str(self.home):
+            if cached.get("version") == CACHE_VERSION and cached.get("home") == str(self.home):
                 self.files = {k: Rollout(v["id"], v) for k, v in cached["files"].items()}
         except (OSError, ValueError, KeyError, TypeError):
             pass
@@ -319,7 +360,7 @@ class Collector:
             self.save()
 
     def save(self):
-        atomic_json(self.data_dir / "cache.json", {"version": 2, "home": str(self.home),
+        atomic_json(self.data_dir / "cache.json", {"version": CACHE_VERSION, "home": str(self.home),
                     "files": {k: v.data for k, v in self.files.items()}})
         self.saved = time.time()
 
@@ -358,7 +399,7 @@ class Collector:
                     if (r["thread"], r["turn"]) not in modern_turns:
                         ledger.setdefault("legacy-" + key, r)
             tasks = {}
-            intervals, models, legacy_count = [], {}, 0
+            intervals, task_intervals, models, legacy_count = [], {}, {}, 0
             def task(tid):
                 if tid not in meta:
                     return None
@@ -374,13 +415,13 @@ class Collector:
                     tasks[tid] = {"id": tid, "title": m["title"], "projectId": m["project_id"],
                                   "projectName": m["project_name"], "cwd": m["cwd"],
                                   "child": m["child"], "parent": m.get("parent"),
-                                  "usage": usage({}), "duration": 0, "turns": [],
+                                  "usage": usage({}), "duration": 0, "turns": [], "incompleteTurns": 0,
                                   "status": "ended", "last": 0, "plan": None, "model": "unknown",
                                   "activeToday": False}
                 return tasks[tid]
             for (tid, turn_id), t in turns.items():
                 is_open = t["end"] is None and t["start"] is not None
-                recent = is_open and now - t["last"] <= stale_seconds
+                recent = is_open and not t["superseded"] and now - t["last"] <= stale_seconds
                 live = recent and self.status["phase"] == "ready"
                 status = t["status"] if not is_open or live else "unknown"
                 # When unconfirmed, stop the provisional interval at last evidence.
@@ -395,11 +436,16 @@ class Collector:
                     continue
                 seconds = max(0, min(end, stop) - max(begin, start)) if overlaps else 0
                 if overlaps:
-                    intervals.append((max(begin, start), min(end, stop)))
+                    interval = (max(begin, start), min(end, stop))
+                    intervals.append(interval)
+                    task_intervals.setdefault(tid, []).append(interval)
+                timing = "complete" if begin is not None and t["end"] is not None else "live" if live else "incomplete"
+                item["incompleteTurns"] += timing == "incomplete"
                 item["duration"] += seconds
                 item["activeToday"] = item["activeToday"] or overlaps or event_today
                 item["turns"].append({"id": turn_id, "start": begin, "end": t["end"],
-                                      "seconds": round(seconds), "status": status, "plan": t["plan"]})
+                                      "seconds": round(seconds), "status": status, "plan": t["plan"],
+                                      "timing": timing, "observedEnd": end})
                 if t["last"] >= item["last"]:
                     item.update(status=status, last=t["last"], plan=t["plan"], model=t["model"])
             for r in ledger.values():
@@ -414,19 +460,23 @@ class Collector:
             projects, total = {}, usage({})
             for t in tasks.values():
                 t["duration"] = round(t["duration"])
+                t["wallTime"] = round(union_seconds(task_intervals.get(t["id"], [])))
                 t["progress"] = progress([t["plan"]])
                 t["turns"].sort(key=lambda x: x["start"] or 0, reverse=True)
                 add_usage(total, t["usage"])
                 p = projects.setdefault(t["projectId"], {"id": t["projectId"], "name": t["projectName"],
                     "tasks": [], "usage": usage({}), "duration": 0, "running": 0,
-                    "waiting": 0, "unknown": 0, "activeToday": False})
+                    "waiting": 0, "unknown": 0, "incompleteTurns": 0, "activeToday": False})
                 p["tasks"].append(t["id"])
                 p["duration"] += t["duration"]
+                p["incompleteTurns"] += t["incompleteTurns"]
                 add_usage(p["usage"], t["usage"])
                 p["activeToday"] = p["activeToday"] or t["activeToday"]
                 for s in ("running", "waiting", "unknown"):
                     p[s] += t["status"] == s
             for p in projects.values():
+                p["wallTime"] = round(union_seconds([interval for tid in p["tasks"]
+                                                     for interval in task_intervals.get(tid, [])]))
                 active = [tasks[i] for i in p["tasks"] if not tasks[i]["child"] and tasks[i]["status"] in ("running", "waiting", "error", "unknown")]
                 p["progress"] = progress([t["plan"] if t["status"] != "unknown" else None for t in active])
             all_tasks = sorted(tasks.values(), key=lambda t: (t["status"] not in ("running", "waiting"), -t["last"]))
@@ -441,6 +491,7 @@ class Collector:
                     "mainTasks": sum(t["activeToday"] and not t["child"] for t in tasks.values()),
                     "childTasks": sum(t["activeToday"] and t["child"] for t in tasks.values()),
                     "duration": sum(t["duration"] for t in tasks.values()),
+                    "incompleteTurns": sum(t["incompleteTurns"] for t in tasks.values()),
                     "wallTime": round(union_seconds(intervals)), "usage": total},
                 "projects": visible_projects, "tasks": all_tasks,
                 "models": [{"model": k, "usage": v} for k, v in sorted(models.items(), key=lambda kv: -kv[1]["total_tokens"])],

@@ -37,19 +37,22 @@ def report(snapshot):
     lines = ["# Codex Pulse 日报 · " + date, "",
              f"统计时区：{snapshot['timezone']}；范围：此设备可读的用户任务与子代理日志。",
              f"项目 {m['projects']} 个；主任务 {m['mainTasks']} 个；子代理 {m['childTasks']} 个。",
-             f"回合累计 {m['duration']} 秒；运行覆盖 {m['wallTime']} 秒。",
+             f"当日运行时长 {m['wallTime']} 秒（并行重叠只计一次）；回合并行累计 {m['duration']} 秒。",
+             f"记录不完整的回合 {m['incompleteTurns']} 个；缺少结束记录时只计至最后执行活动。",
              f"Token {m['usage']['total_tokens']:,}（输入 {m['usage']['input_tokens']:,}，输出 {m['usage']['output_tokens']:,}）。", "",
-             "| 项目 | 累计秒数 | Token | 当前计划步骤 |", "|---|---:|---:|---|"]
+             "| 项目 | 运行秒数 | 并行累计秒数 | 不完整回合 | Token | 当前计划步骤 |", "|---|---:|---:|---:|---:|---|"]
     for p in snapshot["projects"]:
         if not p["activeToday"]:
             continue
         name = p["name"].replace("|", "\\|").replace("\n", " ")
         pr = p["progress"]
         step = f"{pr['completed']}/{pr['total']}" if pr["known"] else "进度未知或当前无运行任务"
-        lines.append(f"| {name} | {p['duration']} | {p['usage']['total_tokens']:,} | {step} |")
+        lines.append(f"| {name} | {p['wallTime']} | {p['duration']} | {p['incompleteTurns']} | {p['usage']['total_tokens']:,} | {step} |")
     lines += ["", "说明：进度表示当前计划步骤比例；回合结束不等于项目验收。",
               "缓存输入是输入子集，推理输出是输出子集；不重复相加。",
-              "状态来自日志观测，静默或断开后显示未确认；未确认区间的耗时只计至最后活动。",
+              "时长来自回合日志，含模型、工具与等待时间，不等于 CPU 或模型生成时间。",
+              "不同项目可能并行，项目运行时长不可直接相加。设置变更不续计时，复制的历史回合不重复计时。",
+              "状态来自日志观测，静默或断开后显示未确认；未确认区间的耗时只计至最后执行活动。",
               f"旧格式响应 {snapshot['source']['legacyResponses']} 条；解析/重置提示 {snapshot['source']['warnings']} 条。",
               "内部审批与记忆任务排除；账户配额未接入。"]
     return "\n".join(lines)

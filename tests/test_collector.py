@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -83,6 +84,48 @@ class ParserTests(unittest.TestCase):
         r.ingest(event("event_msg", 90000, type="thread_settings_applied"))
         self.assertEqual(r.data["turns"]["t"]["last"], 120)
 
+    def test_metadata_after_missing_end_does_not_count_idle_hours(self):
+        r = Rollout("a")
+        r.ingest(event("event_msg", 100, type="task_started", turn_id="old"))
+        r.ingest(event("event_msg", 160, type="item_completed"))
+        for row in [event("event_msg", 21700, type="thread_settings_applied"),
+                    event("world_state", 21700),
+                    event("event_msg", 21700, type="token_count", info=None),
+                    event("turn_context", 21700, turn_id="old", model="model"),
+                    event("response_item", 21700, type="message", role="user")]:
+            r.ingest(row)
+        r.ingest(event("event_msg", 21700, type="task_started", turn_id="new"))
+        self.assertEqual(r.data["turns"]["old"]["last"], 160)
+        self.assertIsNone(r.data["turns"]["old"]["end"])
+        self.assertTrue(r.data["turns"]["old"]["superseded"])
+
+    def test_rebased_fork_history_uses_original_lifecycle_time(self):
+        r = Rollout("child")
+        r.ingest(event("session_meta", 300.89, id="child", timestamp=300.89))
+        r.ingest(event("session_meta", 300.89, id="parent", timestamp=100))
+        r.ingest(event("event_msg", 300.891, type="task_started", turn_id="copied", started_at=100))
+        r.ingest(event("turn_context", 300.891, turn_id="copied", model="old"))
+        r.ingest(event("response_item", 300.891, type="reasoning"))
+        r.ingest(event("event_msg", 300.891, type="token_count", info={"total_token_usage": {"input_tokens": 900}}))
+        r.ingest(event("event_msg", 300.892, type="task_complete", turn_id="copied", started_at=100, completed_at=160))
+        r.ingest(event("event_msg", 300.892, type="task_started", turn_id="copied-open", started_at=290))
+        # The actual child's lifecycle has only whole-second precision.
+        r.ingest(event("event_msg", 300.932, type="task_started", turn_id="own", started_at=300))
+        r.ingest(event("event_msg", 364.917, type="task_complete", turn_id="own", started_at=300, completed_at=364))
+        self.assertEqual(list(r.data["turns"]), ["own"])
+        self.assertEqual(r.data["turns"]["own"]["end"] - r.data["turns"]["own"]["start"], 64)
+        self.assertFalse(r.data["legacy"])
+
+    def test_unchanged_usage_does_not_extend_unfinished_turn(self):
+        r = Rollout("a")
+        r.ingest(event("event_msg", 100, type="task_started", turn_id="t"))
+        for ts in [110, 21700]:
+            r.ingest(event("event_msg", ts, type="token_count", info={"total_token_usage": {"input_tokens": 50}}))
+        self.assertEqual(r.data["turns"]["t"]["last"], 110)
+        for ts in [120, 21800]:
+            r.ingest(event("token_usage_record", ts, thread_id="a", turn_id="t", response_id="same", usage={"input_tokens": 50}))
+        self.assertEqual(r.data["turns"]["t"]["last"], 120)
+
 
 class SnapshotTests(unittest.TestCase):
     def setUp(self):
@@ -124,6 +167,28 @@ class SnapshotTests(unittest.TestCase):
         s = self.collector.snapshot(self.date)
         self.assertEqual((s["metrics"]["projects"], s["metrics"]["mainTasks"], s["metrics"]["childTasks"]), (1, 1, 1))
         self.assertEqual((s["metrics"]["duration"], s["metrics"]["wallTime"]), (120, 90))
+        self.assertEqual(s["projects"][0]["wallTime"], 90)
+
+    def test_new_turn_does_not_keep_incomplete_predecessor_running(self):
+        r = self.make("a")
+        r.ingest(event("event_msg", self.start + 100, type="task_started", turn_id="old"))
+        r.ingest(event("response_item", self.start + 110, type="reasoning"))
+        r.ingest(event("event_msg", self.start + 120, type="task_started", turn_id="new"))
+        with patch("pulse.collector.time.time", return_value=self.start + 130):
+            s = self.collector.snapshot(self.date)
+        turns = {t["id"]: t for t in s["tasks"][0]["turns"]}
+        self.assertEqual((turns["old"]["seconds"], turns["new"]["seconds"]), (10, 10))
+        self.assertEqual(turns["old"]["timing"], "incomplete")
+        self.assertEqual(turns["old"]["observedEnd"], self.start + 110)
+        self.assertEqual(s["metrics"]["incompleteTurns"], 1)
+
+    def test_old_cache_is_rebuilt_after_timing_fix(self):
+        data = self.root / "data"; data.mkdir()
+        (data / "cache.json").write_text(json.dumps({
+            "version": 2, "home": str(self.collector.home),
+            "files": {"bad": Rollout("old").data}}))
+        restored = Collector(self.collector.home, data, "Asia/Shanghai")
+        self.assertEqual(restored.files, {})
 
     def test_silent_open_turn_is_unknown_and_timer_stops(self):
         r = self.make("a")

@@ -62,7 +62,8 @@ Uninstall stops the service and removes its LaunchAgent; it preserves private da
 | Running | An unfinished turn with recent log evidence, within the configurable freshness window. It is **observed activity**, not an authoritative Desktop runtime status. |
 | Progress | Sum of completed steps / total steps across currently relevant main-task plans. One missing plan makes project progress unknown. Steps are equal in weight, not in effort. |
 | Daily projects | Distinct assigned projects with turn intervals or usage overlapping the selected local day. Unassigned tasks remain visible but do not create a fictitious project. |
-| Time | Cumulative clipped turn intervals, including model/tool/wait time; wall time is their union. Silent unfinished turns stop accruing at their last evidence. These are observed elapsed times, not CPU or model generation time. |
+| Runtime | The main daily tile and each project's runtime use the union of clipped turn intervals: simultaneous work counts once. Project runtimes cannot be added because projects can overlap. Model/tool/wait time inside a turn is included; this is observed elapsed time, not CPU or model generation time. |
+| Parallel cumulative time | Sum of clipped intervals across main tasks and subagents, shown separately. Unfinished turns stop at their last execution evidence when stale or superseded; settings changes, user messages and copied history do not extend them. Incomplete intervals are explicitly marked. |
 | Tokens | Deduplicated `token_usage_record.usage` by response ID. Cached input is a subset of input; reasoning output is a subset of output. The source total is preserved. |
 | Legacy tokens | Cumulative snapshot deltas only for turns without response records. Counter resets rebase the fallback and are reported; legacy totals can be incomplete. |
 | Scope | This device's readable user tasks and subagents. Internal guardian/review/memory work and other devices are excluded. |
