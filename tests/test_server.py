@@ -77,6 +77,14 @@ class HTTPTests(unittest.TestCase):
             self.assertIn("记录不完整的回合 0 个", body)
             self.assertIn("| 运行秒数 | 并行累计秒数 | 不完整回合 |", body)
 
+    def test_progress_instructions_are_fixed_public_text(self):
+        with self.request("/progress-instructions.txt") as response:
+            text=response.read().decode()
+            self.assertIn("```codex-pulse-plan",text)
+            self.assertIn("pending",text)
+            self.assertIn("不沿用上一轮的 100%",text)
+            self.assertNotIn("/Users/",text)
+
     def test_quota_is_current_for_every_date_and_has_separate_refresh(self):
         class CurrentQuota:
             def snapshot(self):

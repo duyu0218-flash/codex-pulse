@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -18,11 +19,11 @@ from zoneinfo import ZoneInfo
 FIELDS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
           "output_tokens", "reasoning_output_tokens", "total_tokens")
 INTERNAL = {"guardian_review", "memory_extraction", "memory_consolidation"}
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 TERMINAL = {"task_complete", "turn_aborted", "task_failed"}
 ACTIVITY_EVENTS = {"item_started", "item_completed", "agent_message", "agent_reasoning",
                    "agent_message_delta", "agent_reasoning_delta",
-                   "plan_update", "plan_updated", "exec_command_begin", "exec_command_end",
+                   "plan_update", "plan_updated", "turn/plan/updated", "exec_command_begin", "exec_command_end",
                    "exec_command_output_delta", "mcp_tool_call_begin", "mcp_tool_call_end",
                    "web_search_begin", "web_search_end"}
 ACTIVITY_ITEMS = {"reasoning", "agent_message", "function_call", "function_call_output",
@@ -69,6 +70,50 @@ def progress(plans):
             "percent": round(done / total * 100)}
 
 
+PLAN_BLOCK = re.compile(r"^```codex-pulse-plan[ \t]*\r?\n(.*?)\r?\n```[ \t]*(?:\r?\n|$)", re.M | re.S)
+
+
+def reported_plan(payload):
+    """Only explicit assistant reports count; quoted user/tool examples never do."""
+    if payload.get("type") != "message" or payload.get("role") != "assistant":
+        return False, None
+    content = payload.get("content", [])
+    text = content if isinstance(content, str) else "\n".join(
+        item["text"] for item in content if isinstance(item, dict) and isinstance(item.get("text"), str)
+    ) if isinstance(content, list) else ""
+    if len(text) > 131072:
+        return False, None
+    blocks = list(PLAN_BLOCK.finditer(text))
+    if not blocks:
+        return False, None
+    try:
+        value = json.loads(blocks[-1].group(1))
+        plan = value.get("plan") if isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1 else None
+        if not valid_plan(plan):
+            return True, None
+        # Discard arbitrary extra fields, keeping only bounded step text/status.
+        if any(len(step["step"]) > 1000 for step in plan):
+            return True, None
+        return True, [{"step": step["step"].strip(), "status": step["status"]} for step in plan]
+    except (ValueError, TypeError):
+        return True, None
+
+
+def tracked_progress(tasks, scope="active"):
+    result = progress([task["plan"] for task in tasks])
+    missing = sum(not valid_plan(task["plan"]) for task in tasks)
+    timestamps = [task.get("planUpdatedAt") for task in tasks if task.get("planUpdatedAt") is not None]
+    current = [step["step"] for task in tasks for step in (task["plan"] or [])
+               if step["status"] in ("in_progress", "inProgress")]
+    upcoming = [step["step"] for task in tasks for step in (task["plan"] or []) if step["status"] == "pending"]
+    return {**result, "scope": scope, "stale": any(task["status"] == "unknown" for task in tasks),
+            "updatedAt": max(timestamps) if timestamps else None,
+            "currentSteps": current[:3], "nextStep": upcoming[0] if not current and upcoming else None,
+            "sources": sorted({task["planSource"] for task in tasks if task.get("planSource")}),
+            "reason": (f"{missing}/{len(tasks)} 个相关任务尚未上报有效计划" if missing else
+                       "没有可汇总的主任务计划" if not tasks else "")}
+
+
 def union_seconds(intervals):
     end = None
     total = 0.0
@@ -101,6 +146,7 @@ class Rollout:
         return self.data["turns"].setdefault(turn_id, {
             "id": turn_id, "start": None, "end": None, "last": ts,
             "status": "unknown", "plan": None, "model": self.data["model"],
+            "plan_source": None, "plan_updated_at": None,
             "waiting_call": None, "superseded": False})
 
     def ingest(self, row):
@@ -124,7 +170,7 @@ class Rollout:
         if ts and ts < d["created"]:
             return
         event = p.get("type") if kind == "event_msg" else None
-        turn_id = p.get("turn_id") or d["current"]
+        turn_id = p.get("turn_id") or p.get("turnId") or d["current"]
         # Fork exports may rebase the row timestamp while preserving the original
         # lifecycle times. Compare at lifecycle precision (whole epoch seconds).
         if (event in TERMINAL | {"task_started"} and p.get("started_at") is not None
@@ -185,17 +231,24 @@ class Rollout:
             t["status"] = {"task_complete": "ended", "turn_aborted": "interrupted",
                            "task_failed": "error"}[event]
             t["waiting_call"] = None
-        if event in ("plan_update", "plan_updated"):
-            t["plan"] = p.get("plan") if valid_plan(p.get("plan")) else None
+        def set_plan(plan, source):
+            if ts >= (t.get("plan_updated_at") or 0):
+                t["plan"] = plan if valid_plan(plan) else None
+                t["plan_source"], t["plan_updated_at"] = source, ts
+        if event in ("plan_update", "plan_updated", "turn/plan/updated"):
+            set_plan(p.get("plan"), "codex-plan")
         if kind == "response_item":
+            found, plan = reported_plan(p)
+            if found:
+                set_plan(plan, "agent-report")
             name = p.get("name", "").split(".")[-1]
             if name == "update_plan":
                 try:
                     args = p.get("arguments", p.get("input", {}))
                     args = json.loads(args) if isinstance(args, str) else args
-                    t["plan"] = args.get("plan") if valid_plan(args.get("plan")) else None
+                    set_plan(args.get("plan"), "codex-plan")
                 except (ValueError, TypeError, AttributeError):
-                    t["plan"] = None
+                    set_plan(None, "codex-plan")
             if name in ("request_user_input", "request_user_input_async"):
                 t["waiting_call"] = p.get("call_id")
                 t["status"] = "waiting"
@@ -417,6 +470,7 @@ class Collector:
                                   "child": m["child"], "parent": m.get("parent"),
                                   "usage": usage({}), "duration": 0, "turns": [], "incompleteTurns": 0,
                                   "status": "ended", "last": 0, "plan": None, "model": "unknown",
+                                  "planSource": None, "planUpdatedAt": None,
                                   "activeToday": False}
                 return tasks[tid]
             for (tid, turn_id), t in turns.items():
@@ -447,7 +501,8 @@ class Collector:
                                       "seconds": round(seconds), "status": status, "plan": t["plan"],
                                       "timing": timing, "observedEnd": end})
                 if t["last"] >= item["last"]:
-                    item.update(status=status, last=t["last"], plan=t["plan"], model=t["model"])
+                    item.update(status=status, last=t["last"], plan=t["plan"], model=t["model"],
+                                planSource=t.get("plan_source"), planUpdatedAt=t.get("plan_updated_at"))
             for r in ledger.values():
                 if start <= r["ts"] < stop:
                     item = task(r["thread"])
@@ -461,7 +516,7 @@ class Collector:
             for t in tasks.values():
                 t["duration"] = round(t["duration"])
                 t["wallTime"] = round(union_seconds(task_intervals.get(t["id"], [])))
-                t["progress"] = progress([t["plan"]])
+                t["progress"] = tracked_progress([t])
                 t["turns"].sort(key=lambda x: x["start"] or 0, reverse=True)
                 add_usage(total, t["usage"])
                 p = projects.setdefault(t["projectId"], {"id": t["projectId"], "name": t["projectName"],
@@ -477,8 +532,10 @@ class Collector:
             for p in projects.values():
                 p["wallTime"] = round(union_seconds([interval for tid in p["tasks"]
                                                      for interval in task_intervals.get(tid, [])]))
-                active = [tasks[i] for i in p["tasks"] if not tasks[i]["child"] and tasks[i]["status"] in ("running", "waiting", "error", "unknown")]
-                p["progress"] = progress([t["plan"] if t["status"] != "unknown" else None for t in active])
+                main_tasks = [tasks[i] for i in p["tasks"] if not tasks[i]["child"]]
+                active = [t for t in main_tasks if t["status"] in ("running", "waiting", "error", "unknown")]
+                relevant = active or ([max(main_tasks, key=lambda t: t["last"])] if main_tasks else [])
+                p["progress"] = tracked_progress(relevant, "active" if active else "latest")
             all_tasks = sorted(tasks.values(), key=lambda t: (t["status"] not in ("running", "waiting"), -t["last"]))
             visible_projects = sorted(projects.values(), key=lambda p: (-p["running"], -p["usage"]["total_tokens"]))
             return {"date": date, "today": today.isoformat(), "timezone": str(self.zone),

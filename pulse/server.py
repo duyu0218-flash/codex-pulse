@@ -41,7 +41,7 @@ def report(snapshot):
              f"当日运行时长 {m['wallTime']} 秒（并行重叠只计一次）；回合并行累计 {m['duration']} 秒。",
              f"记录不完整的回合 {m['incompleteTurns']} 个；缺少结束记录时只计至最后执行活动。",
              f"Token {m['usage']['total_tokens']:,}（输入 {m['usage']['input_tokens']:,}，输出 {m['usage']['output_tokens']:,}）。", "",
-             "| 项目 | 运行秒数 | 并行累计秒数 | 不完整回合 | Token | 当前计划步骤 |", "|---|---:|---:|---:|---:|---|"]
+             "| 项目 | 运行秒数 | 并行累计秒数 | 不完整回合 | Token | 任务计划步骤 |", "|---|---:|---:|---:|---:|---|"]
     for p in snapshot["projects"]:
         if not p["activeToday"]:
             continue
@@ -134,6 +134,7 @@ class Handler(BaseHTTPRequestHandler):
         assets = {"/": ("index.html", "text/html; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                   "/style.css": ("style.css", "text/css; charset=utf-8"),
+                  "/progress-instructions.txt": ("progress-instructions.txt", "text/plain; charset=utf-8"),
                   "/favicon.svg": ("favicon.svg", "image/svg+xml")}
         try:
             if path in assets:

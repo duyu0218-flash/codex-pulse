@@ -14,7 +14,15 @@
   const link = (type, id, label, cls='cp-task-name') => `<a class="${cls}" href="#${type}/${encodeURIComponent(id)}">${esc(label)}</a>`;
   const empty = (label) => `<div class="cp-empty">${esc(label)}</div>`;
   const badge = (t) => `<span class="cp-state ${esc(t.status)}">${esc(names[t.status] || names.unknown)}</span>`;
-  const progress = (p, name, idle=false) => `<div class="cp-project-progress ${p.known ? '' : 'is-unknown'}${failed ? ' is-stale' : ''}"><div class="cp-progress-caption"><span>${failed ? '上次计划进度' : '计划步骤'}</span><span class="cp-progress-value">${p.known ? p.percent + '%' : idle ? '当前无运行任务' : '进度未知'}</span></div><div class="cp-progress-track" role="progressbar" aria-label="${esc(name)}计划进度" aria-valuemin="0" aria-valuemax="100" ${p.known ? `aria-valuenow="${p.percent}"` : 'aria-valuetext="进度未知"'}><div class="cp-project-fill" style="width:${p.known ? p.percent : 0}%"></div></div><div class="cp-progress-note">${p.known ? `已完成 ${p.completed} / ${p.total} 步` : idle ? '回合结束与项目验收分别判断' : '未取得完整有效计划，不估算百分比'}</div></div>`;
+  const progress = (p, name, idle=false) => {
+    const stale = failed || p.stale;
+    const label = stale ? '上次计划进度' : p.scope === 'latest' ? '最近任务计划' : '任务计划进度';
+    const stage = p.currentSteps?.length ? `正在进行：${p.currentSteps.map(esc).join('；')}` : p.nextStep ? `下一步：${esc(p.nextStep)}` : p.known && p.completed === p.total ? '本轮计划已完成' : '';
+    return `<div class="cp-project-progress ${p.known ? '' : 'is-unknown'}${stale ? ' is-stale' : ''}"><div class="cp-progress-caption"><span>${label}</span><span class="cp-progress-value">${p.known ? p.percent + '%' : idle ? '暂无任务计划' : '等待计划同步'}</span></div><div class="cp-progress-track" role="progressbar" aria-label="${esc(name)}计划进度" aria-valuemin="0" aria-valuemax="100" ${p.known ? `aria-valuenow="${p.percent}"` : 'aria-valuetext="进度未知，等待计划同步"'}><div class="cp-project-fill" style="width:${p.known ? p.percent : 0}%"></div></div><div class="cp-progress-note">${p.known ? `已完成 ${p.completed} / ${p.total} 步` : esc(p.reason || '任务尚未上报有效计划')}</div>${stage ? `<div class="cp-progress-note cp-progress-stage">${stage}</div>` : ''}${p.updatedAt ? `<div class="cp-progress-note">${stale ? '上次' : '计划'}更新 ${clockTime(p.updatedAt)}${p.sources?.includes('agent-report') ? ' · Codex 自动上报' : ''}</div>` : ''}</div>`;
+  };
+  const progressHelp = () => `<details id="progress-help" class="cp-panel cp-pad cp-gap"><summary>启用进度自动同步</summary><p class="cp-muted cp-gap">将同步指令发送给需要跟进的 Codex 任务，它会在阶段变化时上报步骤状态。后续同一任务会继续同步；新任务也需要启用一次。</p><button class="cp-button cp-gap" id="copy-progress-instructions">复制自动同步指令</button><p class="cp-muted cp-gap" id="progress-message" role="status"></p><textarea id="progress-instructions" class="cp-input cp-report" aria-label="自动同步指令" readonly hidden></textarea></details>`;
+  const boundProgressHelp = new WeakSet();
+
   const taskRows = (tasks) => tasks.length ? `<div class="cp-table-head"><span>任务 / 项目</span><span>状态与计划</span><span>回合累计</span><span>Token</span></div>${tasks.map(t => `<div class="cp-task-row"><div>${link('task',t.id,t.title)}<div class="cp-task-project">${esc(t.projectName)}${t.child ? ' · 子代理' : ''}</div></div><div>${badge(t)}<div class="cp-step">${t.progress.known ? `${t.progress.completed} / ${t.progress.total} 步` : '进度未知'}</div></div><span class="cp-number">${time(t.duration)}${t.incompleteTurns ? '<small class="cp-timing-note">含不完整记录</small>' : ''}</span><span class="cp-number" title="${num(t.usage.total_tokens)}">${token(t.usage.total_tokens)}</span></div>`).join('')}` : empty('此范围内没有任务记录');
   function metrics() {
     const m = data.metrics;
@@ -65,13 +73,13 @@
   function project(id) {
     const p=data.projects.find(x=>x.id===id);
     if (!p) return `<a href="#projects" class="cp-text-link">← 返回项目</a>${empty('此项目在当前日期没有记录，请切换日期。')}`;
-    return `<a href="#projects" class="cp-text-link">← 返回项目</a><div class="cp-detail-title"><h2>${esc(p.name)}</h2><p class="cp-muted">${p.tasks.length} 个任务 · 运行 ${time(p.wallTime)} · 并行累计 ${time(p.duration)} · ${num(p.usage.total_tokens)} Token</p></div><section class="cp-panel cp-pad cp-project-summary">${progress(p.progress,p.name,!p.running&&!p.waiting&&!p.unknown)}<p class="cp-muted cp-gap">项目进度汇总当前主任务的计划步骤；任一任务计划缺失时显示未知。</p>${timingNote(p)}</section><section class="cp-panel"><div class="cp-panel-top"><h2>项目任务</h2></div>${taskRows(data.tasks.filter(t=>p.tasks.includes(t.id)))}</section>`;
+    return `<a href="#projects" class="cp-text-link">← 返回项目</a><div class="cp-detail-title"><h2>${esc(p.name)}</h2><p class="cp-muted">${p.tasks.length} 个任务 · 运行 ${time(p.wallTime)} · 并行累计 ${time(p.duration)} · ${num(p.usage.total_tokens)} Token</p></div><section class="cp-panel cp-pad cp-project-summary">${progress(p.progress,p.name,!p.running&&!p.waiting&&!p.unknown)}<p class="cp-muted cp-gap">汇总当前主任务的步骤完成比例；无活动任务时保留最近任务计划。步骤等权，100% 表示本轮计划已完成，项目验收另行确认。</p>${timingNote(p)}</section>${progressHelp()}<section class="cp-panel"><div class="cp-panel-top"><h2>项目任务</h2></div>${taskRows(data.tasks.filter(t=>p.tasks.includes(t.id)))}</section>`;
   }
   function task(id) {
     const t=data.tasks.find(x=>x.id===id);
     if (!t) return `<a href="#overview" class="cp-text-link">← 返回总览</a>${empty('此任务在当前日期没有记录。')}`;
     const plan=t.plan;
-    return `${link('project',t.projectId,'← 返回项目','cp-text-link')}<div class="cp-detail-title"><h2>${esc(t.title)}</h2>${badge(t)}<p class="cp-muted cp-gap">${esc(t.model)} · ${t.child?'子代理':'主任务'} · 最后活动 ${new Date(t.last*1000).toLocaleString('zh-CN',{timeZone:data.timezone,hour12:false})}</p></div><div class="cp-details-grid"><div class="cp-detail-cell">当日回合累计<strong>${time(t.duration)}</strong></div><div class="cp-detail-cell">当日 Token<strong>${num(t.usage.total_tokens)}</strong></div></div>${timingNote(t)}<section class="cp-panel cp-pad cp-gap"><h2>最近计划</h2>${progress(t.progress,t.title)}${plan ? plan.map((s,i)=>`<div class="cp-plan-row"><span class="cp-plan-mark ${s.status==='completed'?'done':s.status==='pending'?'':'current'}">${s.status==='completed'?'✓':i+1}</span><span>${esc(s.step)}</span><span class="cp-muted">${s.status==='completed'?'已完成':s.status==='pending'?'待开始':'进行中'}</span></div>`).join('') : '<p class="cp-muted cp-gap">该任务尚未记录结构化计划。</p>'}</section><section class="cp-panel cp-pad"><h2>当日回合</h2>${t.turns.map(r=>`<div class="cp-turn-row"><span>${clockTime(r.start)}<small class="cp-timing-note">${r.timing==='incomplete' ? '记录不完整 · 最后活动' : r.timing==='live' ? '暂计至' : '结束于'} ${clockTime(r.observedEnd)}</small></span><span>${esc(names[r.status] || names.unknown)}</span><span>${time(r.seconds)}</span></div>`).join('') || empty('只有用量记录，缺少回合时间')}</section><details class="cp-panel cp-pad"><summary>数据归属</summary><p class="cp-muted cp-gap cp-wrap">工作目录：${esc(t.cwd)}<br>任务 ID：${esc(t.id)}</p></details>`;
+    return `${link('project',t.projectId,'← 返回项目','cp-text-link')}<div class="cp-detail-title"><h2>${esc(t.title)}</h2>${badge(t)}<p class="cp-muted cp-gap">${esc(t.model)} · ${t.child?'子代理':'主任务'} · 最后活动 ${new Date(t.last*1000).toLocaleString('zh-CN',{timeZone:data.timezone,hour12:false})}</p></div><div class="cp-details-grid"><div class="cp-detail-cell">当日回合累计<strong>${time(t.duration)}</strong></div><div class="cp-detail-cell">当日 Token<strong>${num(t.usage.total_tokens)}</strong></div></div>${timingNote(t)}<section class="cp-panel cp-pad cp-gap"><h2>最近计划</h2>${progress(t.progress,t.title)}${plan ? plan.map((s,i)=>`<div class="cp-plan-row"><span class="cp-plan-mark ${s.status==='completed'?'done':s.status==='pending'?'':'current'}">${s.status==='completed'?'✓':i+1}</span><span>${esc(s.step)}</span><span class="cp-muted">${s.status==='completed'?'已完成':s.status==='pending'?'待开始':'进行中'}</span></div>`).join('') : '<p class="cp-muted cp-gap">该任务尚未上报计划。展开下方“启用进度自动同步”即可获取同步指令。</p>'}</section><section class="cp-panel cp-pad"><h2>当日回合</h2>${t.turns.map(r=>`<div class="cp-turn-row"><span>${clockTime(r.start)}<small class="cp-timing-note">${r.timing==='incomplete' ? '记录不完整 · 最后活动' : r.timing==='live' ? '暂计至' : '结束于'} ${clockTime(r.observedEnd)}</small></span><span>${esc(names[r.status] || names.unknown)}</span><span>${time(r.seconds)}</span></div>`).join('') || empty('只有用量记录，缺少回合时间')}</section>${progressHelp()}<details class="cp-panel cp-pad"><summary>数据归属</summary><p class="cp-muted cp-gap cp-wrap">工作目录：${esc(t.cwd)}<br>任务 ID：${esc(t.id)}</p></details>`;
   }
   function usage() {
     const u=data.metrics.usage;
@@ -82,15 +90,22 @@
   }
   function settings() {
     const s=data.settings;
-    return `<div class="cp-two"><section class="cp-panel cp-pad"><h2>显示偏好</h2><form id="settings-form" class="cp-form cp-gap"><label>刷新间隔（秒）<input class="cp-input" name="refreshSeconds" type="number" min="2" max="60" required value="${s.refreshSeconds}"></label><label>状态确认窗口（秒）<input class="cp-input" name="staleSeconds" type="number" min="30" max="1800" required value="${s.staleSeconds}"><span class="cp-muted">超过此时间没有日志，运行状态转为未确认。静默不代表卡住。</span></label><label>外观<select class="cp-input" name="theme">${[['system','跟随系统'],['light','浅色'],['dark','深色']].map(([v,label])=>`<option value="${v}" ${s.theme===v?'selected':''}>${label}</option>`).join('')}</select></label><button type="submit" class="cp-button cp-primary">保存偏好</button><p id="save-message" role="status" class="cp-muted"></p></form></section><section class="cp-panel cp-pad"><h2>数据连接</h2><dl class="cp-diagnostics"><dt>采集方式</dt><dd>本机日志增量读取</dd><dt>账号额度</dt><dd>官方接口 · ${data.quota.enabled ? "每 60 秒查询" : "已关闭"}</dd><dt>历史范围</dt><dd>最近 ${data.source.days} 天 · ${esc(data.timezone)}</dd><dt>已索引</dt><dd>${data.source.indexed} / ${data.source.total} 个日志</dd><dt>排除内部任务</dt><dd>${data.source.excluded} 个</dd><dt>解析或重置提示</dt><dd>${data.source.warnings} 条</dd><dt>Codex 数据目录</dt><dd>${esc(data.source.codexHome)}</dd><dt>看板数据目录</dt><dd>${esc(data.source.dataDir)}</dd></dl><p class="cp-muted cp-gap">仅监听 127.0.0.1。任务日志只读，偏好和统计缓存保存在看板自己的目录。额度通过本机 Codex CLI 查询官方服务，凭据由 Codex 管理，额度数据仅驻留内存。</p></section></div>`;
+    return `<div class="cp-two"><section class="cp-panel cp-pad"><h2>显示偏好</h2><form id="settings-form" class="cp-form cp-gap"><label>刷新间隔（秒）<input class="cp-input" name="refreshSeconds" type="number" min="2" max="60" required value="${s.refreshSeconds}"></label><label>状态确认窗口（秒）<input class="cp-input" name="staleSeconds" type="number" min="30" max="1800" required value="${s.staleSeconds}"><span class="cp-muted">超过此时间没有日志，运行状态转为未确认。静默不代表卡住。</span></label><label>外观<select class="cp-input" name="theme">${[['system','跟随系统'],['light','浅色'],['dark','深色']].map(([v,label])=>`<option value="${v}" ${s.theme===v?'selected':''}>${label}</option>`).join('')}</select></label><button type="submit" class="cp-button cp-primary">保存偏好</button><p id="save-message" role="status" class="cp-muted"></p></form></section><section class="cp-panel cp-pad"><h2>数据连接</h2><dl class="cp-diagnostics"><dt>采集方式</dt><dd>本机日志增量读取</dd><dt>账号额度</dt><dd>官方接口 · ${data.quota.enabled ? "每 60 秒查询" : "已关闭"}</dd><dt>历史范围</dt><dd>最近 ${data.source.days} 天 · ${esc(data.timezone)}</dd><dt>已索引</dt><dd>${data.source.indexed} / ${data.source.total} 个日志</dd><dt>排除内部任务</dt><dd>${data.source.excluded} 个</dd><dt>解析或重置提示</dt><dd>${data.source.warnings} 条</dd><dt>Codex 数据目录</dt><dd>${esc(data.source.codexHome)}</dd><dt>看板数据目录</dt><dd>${esc(data.source.dataDir)}</dd></dl><p class="cp-muted cp-gap">仅监听 127.0.0.1。任务日志只读，偏好和统计缓存保存在看板自己的目录。额度通过本机 Codex CLI 查询官方服务，凭据由 Codex 管理，额度数据仅驻留内存。</p></section></div>${progressHelp()}`;
   }
   function render() {
     if (!data) return;
     const r=route();
+    const help=$('#progress-help');
+    const helpFocus=help?.contains(document.activeElement) ? document.activeElement : null;
     $('#page-title').textContent=titles[r.page];
     $('#page-subtitle').textContent=r.page==='overview' ? `${data.date} · ${data.timezone}` : r.page==='settings' ? '本机连接与显示偏好' : r.page==='usage' ? `当前账号额度 · ${data.date} 的本机用量` : `${data.date} 的任务记录`;
     document.querySelectorAll('[data-nav]').forEach(a=>{const selected=a.dataset.nav===(['task','project'].includes(r.page)?'projects':r.page); if(selected)a.setAttribute('aria-current','page');else a.removeAttribute('aria-current');});
     $('#content').innerHTML=({overview,projects,usage,report:reportPage,settings,project:()=>project(r.id),task:()=>task(r.id)})[r.page]();
+    // Keep the disclosure, copy feedback and fallback selection through live updates.
+    if(help && $('#progress-help')) {
+      $('#progress-help').replaceWith(help);
+      helpFocus?.focus({preventScroll:true});
+    }
     $('#content').setAttribute('aria-busy','false');
     bind();
     if(r.page==='report') loadReport();
@@ -106,6 +121,20 @@
     } catch(e) {if($('#report-message')) $('#report-message').textContent=e.message;}
   }
   function bind() {
+    const help=$('#progress-help');
+    if(help && !boundProgressHelp.has(help)) {
+      boundProgressHelp.add(help);
+      help.querySelector('#copy-progress-instructions').addEventListener('click',async()=>{
+      const message=help.querySelector('#progress-message');
+      try {
+        const response=await fetch('/progress-instructions.txt');
+        if(!response.ok) throw Error('读取失败');
+        const instruction=await response.text();
+        try {await navigator.clipboard.writeText(instruction);message.textContent='已复制，请发送到需要同步的 Codex 任务。';}
+        catch {const input=help.querySelector('#progress-instructions');input.hidden=false;input.value=instruction;if(input.isConnected){input.focus();input.select();}message.textContent='已选中同步指令，可按 ⌘C / Ctrl+C 复制。';}
+      } catch {message.textContent='同步指令读取失败，请检查本机连接。';}
+      });
+    }
     $('#refresh-quota')?.addEventListener('click',async e=>{
       e.currentTarget.disabled=true;
       quotaMessage='';

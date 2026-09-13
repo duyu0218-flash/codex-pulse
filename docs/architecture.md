@@ -34,6 +34,14 @@ Normalization prefers the multi-bucket map, falls back to the legacy bucket, and
 
 The macOS installer copies an immutable source release identified by content hash and registers a user LaunchAgent. Logs and cache live outside both the clone and Codex's data directory. The standard-library implementation has no build artifact or package installation requirement; deployment uses the exact checked source files.
 
+## Task plan reporting
+
+Progress uses structured steps from `update_plan`, compatible plan events, or a `codex-pulse-plan` JSON fence inside an assistant message. The report has `version: 1` and a valid `plan`; only bounded `step` text and `status` are retained. User/developer messages, generic prose, tool outputs, unsupported schema versions, invalid statuses and incomplete JSON are not promoted to progress. An invalid explicit report clears the old plan; out-of-order reports do not replace a newer plan. Existing session/turn attribution and fork-history exclusions also apply.
+
+Each turn stores its plan source and update timestamp. New turns start without an inherited plan. Main-task plans aggregate by step count; child plans do not double-count parent progress. A project with no active main tasks shows its most recent main task's final plan. Unknown runtime state makes a valid plan stale rather than destroying the last reported progress. Missing plans keep the aggregate unknown with a count of missing task plans. These percentages are agent-reported plan completion, not independently verified acceptance or effort estimates.
+
+Cache schema 4 forces replay to backfill progress source/timestamps. It leaves token and timing rules unchanged. The dashboard serves a fixed synchronization instruction and lets the user copy it; sending it to tasks is an explicit user action, not a background control endpoint. No global or other-project instructions are edited by the app. A task must maintain its reports for automatic updates; each new task needs the instruction or native plan events.
+
 ## Adapter limitations
 
 The storage adapter is not an official cross-version API. No authoritative running-instance subscription was available in the verified Desktop setup. “Running” therefore means recent evidence of an unfinished turn; stale observations are explicitly unknown. Approval states that are not persisted cannot be recovered, and a captured input request is not proof that a user is still waiting. There is no reliable ETA, billing total or acceptance status inferred from these records. Account quota has a separate official source and is not inferred from local tokens. If the desktop host uses a different account or authentication store than the CLI, the displayed quota belongs to the CLI login; alternative stores and account-switch scenarios need host-specific verification.

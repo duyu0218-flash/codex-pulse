@@ -8,11 +8,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pulse.collector import Collector, Rollout, progress, timestamp, union_seconds, usage
+from pulse.collector import Collector, Rollout, progress, reported_plan, timestamp, union_seconds, usage
 
 
 def event(kind, ts, **payload):
     return {"type": kind, "timestamp": ts, "payload": payload}
+
+
+def plan_message(plan, role="assistant"):
+    return {"type": "message", "role": role, "content": [{"type": "output_text", "text":
+            "```codex-pulse-plan\n" + json.dumps({"version": 1, "plan": plan}) + "\n```"}]}
 
 
 class ParserTests(unittest.TestCase):
@@ -29,6 +34,53 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(progress([p, p])["percent"], 50)
         self.assertFalse(progress([p, None])["known"])
         self.assertFalse(progress([[{"step": "", "status": "completed"}]])["known"])
+
+    def test_explicit_assistant_progress_and_native_event(self):
+        r = Rollout("a")
+        r.ingest(event("event_msg", 100, type="task_started", turn_id="t"))
+        plan = [{"step": "implemented", "status": "completed"}, {"step": "verify", "status": "in_progress"}]
+        r.ingest(event("response_item", 110, **plan_message(plan)))
+        self.assertEqual(r.data["turns"]["t"]["plan"], plan)
+        self.assertEqual(r.data["turns"]["t"]["plan_source"], "agent-report")
+        self.assertEqual(r.data["turns"]["t"]["plan_updated_at"], 110)
+        updated = [{"step": "new scope", "status": "inProgress"}]
+        r.ingest(event("event_msg", 120, type="turn/plan/updated", turnId="t", plan=updated))
+        self.assertEqual(r.data["turns"]["t"]["plan"], updated)
+        self.assertEqual(r.data["turns"]["t"]["plan_source"], "codex-plan")
+        r.ingest(event("response_item", 115, **plan_message(plan)))
+        self.assertEqual(r.data["turns"]["t"]["plan"], updated)
+
+    def test_plan_reports_ignore_user_tool_prose_and_extra_fields(self):
+        plan = [{"step": "a", "status": "completed", "privateExtra": "DO-NOT-CACHE"}]
+        found, reduced = reported_plan(plan_message(plan))
+        self.assertTrue(found)
+        self.assertEqual(reduced, [{"step": "a", "status": "completed"}])
+        for role in ("user", "developer", "tool"):
+            self.assertEqual(reported_plan(plan_message(plan, role)), (False, None))
+        for text in ['已完成 90%，接下来测试', '```json\n{"plan": []}\n```']:
+            self.assertEqual(reported_plan({"type":"message", "role":"assistant", "content":text}), (False, None))
+
+    def test_invalid_report_clears_old_plan_and_new_turn_starts_unknown(self):
+        r = Rollout("a")
+        r.ingest(event("event_msg", 100, type="task_started", turn_id="t"))
+        r.ingest(event("response_item", 110, **plan_message([{"step":"a", "status":"completed"}])))
+        r.ingest(event("response_item", 120, **plan_message([{"step":"b", "status":"invented"}])))
+        self.assertIsNone(r.data["turns"]["t"]["plan"])
+        r.ingest(event("response_item", 130, **plan_message([{"step":"a", "status":"completed"}])))
+        r.ingest(event("event_msg", 140, type="task_complete", turn_id="t"))
+        r.ingest(event("event_msg", 150, type="task_started", turn_id="new"))
+        self.assertIsNone(r.data["turns"]["new"]["plan"])
+        self.assertIsNone(r.data["turns"]["new"]["plan_updated_at"])
+
+    def test_truncated_unsupported_and_forked_reports_do_not_set_progress(self):
+        for text in ['```codex-pulse-plan\n{"version":', '```codex-pulse-plan\nnot json\n```',
+                     '```codex-pulse-plan\n{"version":2,"plan":[]}\n```']:
+            self.assertIsNone(reported_plan({"type":"message", "role":"assistant", "content":text})[1])
+        r = Rollout("child")
+        r.data["created"] = 200
+        r.ingest(event("event_msg", 210, type="task_started", turn_id="own"))
+        r.ingest(event("response_item", 100, **plan_message([{"step":"copied", "status":"completed"}])))
+        self.assertIsNone(r.data["turns"]["own"]["plan"])
 
     def test_partial_append_and_replay(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -210,6 +262,51 @@ class SnapshotTests(unittest.TestCase):
         s = self.collector.snapshot(self.date)
         self.assertEqual(s["metrics"]["runningProjects"], 1)
         self.assertFalse(s["projects"][0]["progress"]["known"])
+
+    def test_reported_progress_updates_preserves_completed_and_resets_for_new_work(self):
+        r = self.make("a")
+        r.ingest(event("event_msg", self.start + 100, type="task_started", turn_id="t"))
+        plan = [{"step":"build", "status":"completed"}, {"step":"verify", "status":"in_progress"}]
+        r.ingest(event("response_item", self.start + 110, **plan_message(plan)))
+        with patch("pulse.collector.time.time", return_value=self.start + 120):
+            s = self.collector.snapshot(self.date)
+        p = s["projects"][0]["progress"]
+        self.assertEqual(p["percent"], 50)
+        self.assertEqual(p["currentSteps"], ["verify"])
+        self.assertEqual(p["updatedAt"], self.start + 110)
+        self.assertEqual(p["sources"], ["agent-report"])
+        with patch("pulse.collector.time.time", return_value=self.start + 1000):
+            stale = self.collector.snapshot(self.date)["projects"][0]["progress"]
+        self.assertTrue(stale["stale"])
+        self.assertEqual(stale["percent"], 50)
+        plan[1]["status"] = "completed"
+        r.ingest(event("response_item", self.start + 1200, **plan_message(plan)))
+        r.ingest(event("event_msg", self.start + 1210, type="task_complete", turn_id="t"))
+        with patch("pulse.collector.time.time", return_value=self.start + 1220):
+            p = self.collector.snapshot(self.date)["projects"][0]["progress"]
+        self.assertEqual((p["percent"], p["scope"]), (100, "latest"))
+        r.ingest(event("event_msg", self.start + 1230, type="task_started", turn_id="new"))
+        with patch("pulse.collector.time.time", return_value=self.start + 1240):
+            p = self.collector.snapshot(self.date)["projects"][0]["progress"]
+        self.assertFalse(p["known"])
+        self.assertIn("1/1", p["reason"])
+
+    def test_project_progress_omits_child_plan_and_reports_missing_main_plan(self):
+        for tid, child, plan in [("a",False,[{"step":"build","status":"completed"}]),
+                                 ("b",False,None), ("child",True,[{"step":"child","status":"completed"}])]:
+            r=self.make(tid,child=child,parent="a" if child else None)
+            r.ingest(event("event_msg",self.start+100,type="task_started",turn_id="t"))
+            if plan:r.ingest(event("response_item",self.start+110,**plan_message(plan)))
+        with patch("pulse.collector.time.time",return_value=self.start+120):
+            p=self.collector.snapshot(self.date)["projects"][0]["progress"]
+        self.assertFalse(p["known"])
+        self.assertIn("1/2",p["reason"])
+
+    def test_v3_cache_is_replayed_for_new_progress_fields(self):
+        directory=self.root/"data";directory.mkdir()
+        (directory/"cache.json").write_text(json.dumps({"version":3,"home":str(self.collector.home),
+                                                     "files":{"old":Rollout("old").data}}))
+        self.assertEqual(Collector(self.collector.home,directory,"Asia/Shanghai").files,{})
 
     def test_cache_restart_does_not_store_messages(self):
         r = self.make("a")

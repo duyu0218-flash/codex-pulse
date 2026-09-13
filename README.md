@@ -7,7 +7,7 @@ A local dashboard for Codex projects, observed activity, plan progress, time, to
 ## What works
 
 - **Overview:** observed running projects, daily distinct projects, main tasks and subagents, cumulative turn time and union wall time.
-- **Project progress bars:** completed plan steps / total steps. Missing or invalid plans display **进度未知**, without an invented percentage or ETA.
+- **Project progress bars:** completed plan steps / total steps, current steps and last plan update. Codex plans and explicit agent progress reports sync automatically. Missing plans display **等待计划同步** without an invented percentage or ETA; stale plans are labeled as the last observation.
 - **Project and task details:** search, drilldown, plan steps, recent turn history and source attribution.
 - **Usage:** response-level deduplication, input/cache/output/reasoning breakdown, project and model totals.
 - **Account quota:** official remaining percentages and progress bars, actual window lengths, reset time/countdown, and available reset count. All returned quota buckets (including separate model limits) appear in overview and usage.
@@ -38,6 +38,20 @@ python3 -B -m pulse --port 43189 --days 30 --timezone Asia/Shanghai \
 ```
 
 History is limited to the selected rolling window (1–365 days, default 30). Startup replays the relevant files, including older session files updated during that window. Subsequent scans read only appended lines. The initial import of a large history may take some time.
+
+### Automatic task progress
+
+If a task already emits an `update_plan` call or a supported plan event, Pulse reads its steps automatically. Some Codex environments do not expose that tool and only write prose updates. In that case, open **设置 / 项目详情 / 任务详情 → 启用进度自动同步**, copy the instruction, and send it once to the Codex task you want to track. The task maintains its own evidence-based plan and reports it when stages change. Each new task needs to be enabled; Pulse does not inject global instructions or send messages by itself.
+
+The portable report format is an assistant-authored fenced block:
+
+```codex-pulse-plan
+{"version":1,"plan":[{"step":"Implement the requested change","status":"completed"},{"step":"Validate the result","status":"in_progress"},{"step":"Deliver the verified change","status":"pending"}]}
+```
+
+Only the dedicated block in an assistant message is accepted. Ordinary prose, user examples, tool outputs and inherited fork history are not progress evidence. The agent should report real steps rather than guess a percentage. The complete [sync instruction](pulse/static/progress-instructions.txt) requires a fresh plan for new work and preserves incomplete steps when blocked.
+
+Progress describes the **current task plan**, not whole-project acceptance or remaining work time. Projects aggregate active main-task plans. If every main task has ended, the most recent task's final plan remains visible. Starting a new turn clears its prior plan until a fresh one is reported. Changing plan scope can move the percentage backward. Version 0.1.3 rebuilds the local cache once to replay these progress fields.
 
 ### Account quota connection
 
@@ -76,7 +90,7 @@ Uninstall stops the service and removes its LaunchAgent; it preserves private da
 | Metric | Definition |
 |---|---|
 | Running | An unfinished turn with recent log evidence, within the configurable freshness window. It is **observed activity**, not an authoritative Desktop runtime status. |
-| Progress | Sum of completed steps / total steps across currently relevant main-task plans. One missing plan makes project progress unknown. Steps are equal in weight, not in effort. |
+| Progress | Sum of completed steps / total steps across active main-task plans, or the latest task plan when none are active. One missing plan makes the aggregate unknown and reports how many plans are missing. Existing stale plans remain visible as the last observation. Steps are equal in weight, not in effort; 100% is completion of that plan, not project acceptance. |
 | Daily projects | Distinct assigned projects with turn intervals or usage overlapping the selected local day. Unassigned tasks remain visible but do not create a fictitious project. |
 | Runtime | The main daily tile and each project's runtime use the union of clipped turn intervals: simultaneous work counts once. Project runtimes cannot be added because projects can overlap. Model/tool/wait time inside a turn is included; this is observed elapsed time, not CPU or model generation time. |
 | Parallel cumulative time | Sum of clipped intervals across main tasks and subagents, shown separately. Unfinished turns stop at their last execution evidence when stale or superseded; settings changes, user messages and copied history do not extend them. Incomplete intervals are explicitly marked. |
